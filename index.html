@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 BLE 遙控器</title>
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 樣式保持與先前設計一致 */
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .control-button { transition: all 0.1s ease; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08); }
+        .control-button:active { transform: translateY(2px); box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }
+        .turn-btn { background-color: #3b82f6; }
+        .speed-btn { background-color: #10b981; }
+        .drive-btn { background-color: #f97316; }
+        .drive-control-btn { width: 100px; height: 100px; }
+        .turn-control-btn { width: 100px; height: 60px; }
+        
+        @media (orientation: landscape) {
+            body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem 0; }
+            .main-container { width: 95%; max-width: 800px; padding: 1rem; }
+            .control-layout { height: 100%; justify-content: space-around; }
+        }
+    </style>
+</head>
+<body class="p-4">
+
+    <div class="main-container mx-auto bg-white rounded-xl shadow-2xl p-6 space-y-4 sm:space-y-6">
+        <div class="info-area space-y-4">
+             <h1 class="text-2xl sm:text-3xl font-bold text-center text-gray-800 border-b-2 pb-3">
+                ESP32 BLE 遙控器
+            </h1>
+
+            <!-- 連線控制區 (使用 Web Bluetooth API) -->
+            <div class="flex items-center justify-between bg-blue-50 p-3 rounded-lg border border-blue-200">
+                <button id="connect-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                    連線藍牙
+                </button>
+                <span id="connection-status" class="font-semibold text-gray-600">狀態: 未連線</span>
+            </div>
+
+            <!-- 連線日誌 -->
+            <div class="bg-gray-100 p-3 rounded-lg shadow-inner">
+                <p class="text-base font-semibold text-gray-700 mb-1">指令發送日誌：</p>
+                <div id="status-display" class="bg-white p-2 rounded-md text-xs text-gray-800 font-mono min-h-[30px] flex items-center">
+                    等待連線...
+                </div>
+            </div>
+        </div>
+
+        <!-- 核心控制區 -->
+        <section class="control-layout flex justify-between items-center py-4 relative">
+            
+            <!-- 左側：驅動控制 (F/B) -->
+            <div class="flex flex-col items-center space-y-4">
+                <h3 class="text-lg font-medium text-gray-600">驅動 (按住)</h3>
+                <button id="drive-forward"
+                        class="control-button drive-btn text-white font-bold rounded-full drive-control-btn text-xl" 
+                        data-command-press="F" 
+                        data-command-release="S">
+                    F
+                </button>
+                <button id="drive-backward"
+                        class="control-button drive-btn text-white font-bold rounded-full drive-control-btn text-xl" 
+                        data-command-press="B"
+                        data-command-release="S">
+                    B
+                </button>
+            </div>
+            
+            <!-- 中央：緊急停止 (S) -->
+            <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <button id="emergency-stop"
+                        class="control-button bg-red-600 text-white font-bold rounded-full w-20 h-20 text-lg shadow-xl pointer-events-auto" 
+                        data-command="S">
+                    停止
+                    (S)
+                </button>
+            </div>
+
+
+            <!-- 右側：速度與轉向控制 -->
+            <div class="flex flex-col items-center space-y-6">
+                
+                <!-- 速度設定 (L, M, H) -->
+                <section class="space-y-2">
+                    <h3 class="text-lg font-medium text-gray-600 text-center">速度</h3>
+                    <div class="flex space-x-3">
+                        <button class="control-button speed-btn text-white font-bold py-2 px-4 rounded-lg text-sm drive-control" 
+                                data-command="L">
+                            低速 (L)
+                        </button>
+                        <button class="control-button speed-btn text-white font-bold py-2 px-4 rounded-lg text-sm drive-control" 
+                                data-command="M">
+                            中速 (M)
+                        </button>
+                        <button class="control-button speed-btn text-white font-bold py-2 px-4 rounded-lg text-sm drive-control" 
+                                data-command="H">
+                            高速 (H)
+                        </button>
+                    </div>
+                </section>
+
+                <!-- 轉向控制 (X/Y) -->
+                <section class="space-y-2">
+                    <h3 class="text-lg font-medium text-gray-600 text-center">轉向 (按住)</h3>
+                    <div class="flex space-x-3">
+                        <button id="turn-left"
+                                class="control-button turn-btn text-white font-bold rounded-xl text-lg turn-control-btn" 
+                                data-command-press="X" 
+                                data-command-release="Z">
+                            左轉 (X)
+                        </button>
+                        <button id="turn-right"
+                                class="control-button turn-btn text-white font-bold rounded-xl text-lg turn-control-btn" 
+                                data-command-press="Y" 
+                                data-command-release="Z">
+                            右轉 (Y)
+                        </button>
+                    </div>
+                </section>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        // --- BLE UUID 設定 (重要: 必須與 ESP32 程式碼匹配) ---
+        const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'; // 服務 UUID
+        const RX_CHARACTERISTIC_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // 寫入特性 (Transmit) UUID
+        
+        let txCharacteristic = null;
+        let isConnected = false;
+
+        const statusDisplay = document.getElementById('status-display');
+        const connectionStatus = document.getElementById('connection-status');
+        const connectButton = document.getElementById('connect-button');
+        
+        // 抓取按鈕元素
+        const driveControls = document.querySelectorAll('.drive-control'); 
+        const driveForwardButton = document.getElementById('drive-forward');
+        const driveBackwardButton = document.getElementById('drive-backward'); 
+        const turnLeftButton = document.getElementById('turn-left');
+        const turnRightButton = document.getElementById('turn-right');
+        const emergencyStopButton = document.getElementById('emergency-stop'); 
+
+        // ----------------------------------------------------
+        // 藍牙連線核心邏輯
+        // ----------------------------------------------------
+
+        connectButton.addEventListener('click', connectBluetooth);
+
+        function updateStatus(message, isError = false) {
+            console.log(message);
+            connectionStatus.textContent = `狀態: ${message}`;
+            connectionStatus.className = isError 
+                ? 'font-semibold text-red-600' 
+                : isConnected 
+                    ? 'font-semibold text-green-600' 
+                    : 'font-semibold text-gray-600';
+            connectButton.textContent = isConnected ? '斷開連線' : '連線藍牙';
+        }
+
+        async function connectBluetooth() {
+            if (!navigator.bluetooth) {
+                updateStatus('錯誤: 瀏覽器不支援 Web BLE', true);
+                return;
+            }
+            
+            if (isConnected) {
+                // 斷開連線邏輯
+                if (txCharacteristic && txCharacteristic.service.device.gatt.connected) {
+                    txCharacteristic.service.device.gatt.disconnect();
+                }
+                txCharacteristic = null;
+                isConnected = false;
+                updateStatus('已斷開連線');
+                return;
+            }
+
+            try {
+                updateStatus('正在掃描...');
+                
+                // 1. 請求裝置 (過濾器使用服務 UUID)
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_UUID] }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                // 註冊斷線事件
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+
+                updateStatus(`連線中: ${device.name}...`);
+
+                // 2. 連線 GATT 伺服器
+                const server = await device.gatt.connect();
+
+                // 3. 獲取服務
+                const service = await server.getPrimaryService(SERVICE_UUID);
+
+                // 4. 獲取特性 (Characteristic)
+                txCharacteristic = await service.getCharacteristic(RX_CHARACTERISTIC_UUID);
+
+                isConnected = true;
+                updateStatus(`連線成功: ${device.name}`);
+                sendBluetoothCommand('S'); // 連線後先發送停止指令
+                sendBluetoothCommand('Z'); // 連線後確保舵機回中
+
+            } catch (error) {
+                isConnected = false;
+                txCharacteristic = null;
+                updateStatus(`連線失敗: ${error.message}`, true);
+            }
+        }
+
+        function onDisconnected(event) {
+            isConnected = false;
+            txCharacteristic = null;
+            updateStatus(`已斷開連線: ${event.target.name}`);
+        }
+
+        // ----------------------------------------------------
+        // 指令發送邏輯 (改為 BLE 傳輸)
+        // ----------------------------------------------------
+
+        async function sendBluetoothCommand(command) {
+            const now = new Date();
+            const timeString = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+            
+            let commandName = '';
+            switch(command) {
+                case 'L': commandName = '設定低速 (L)'; break;
+                case 'M': commandName = '設定中速 (M)'; break;
+                case 'H': commandName = '設定高速 (H)'; break;
+                case 'F': commandName = '馬達前進 (F)'; break;
+                case 'B': commandName = '馬達後退 (B)'; break;
+                case 'S': commandName = '馬達停止 (S)'; break;
+                case 'X': commandName = '舵機 左轉 (X)'; break;
+                case 'Y': commandName = '舵機 右轉 (Y)'; break;
+                case 'Z': commandName = '舵機 回中 (Z)'; break;
+                default: commandName = `未知指令 (${command})`;
+            }
+
+
+            if (!isConnected || !txCharacteristic) {
+                statusDisplay.innerHTML = `<span class="text-red-600">[${timeString}]</span> <b>連線錯誤</b>: 請先連線藍牙裝置。`;
+                return;
+            }
+
+            try {
+                // 將字串指令轉換為 Uint8Array (數據格式)
+                const data = new TextEncoder().encode(command);
+
+                // 寫入特性 (Characteristic)
+                await txCharacteristic.writeValue(data);
+
+                // 更新發送日誌
+                statusDisplay.innerHTML = `<span class="text-blue-600">[${timeString}]</span> 成功發送: <b>${command}</b> (${commandName})`;
+
+            } catch (error) {
+                statusDisplay.innerHTML = `<span class="text-red-600">[${timeString}]</span> 發送失敗: ${error.message}`;
+                // 如果是斷線錯誤，更新連線狀態
+                if (error.message.includes('disconnected')) {
+                    onDisconnected({ target: { name: 'Device' } });
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // UI 事件處理邏輯 (按住/放開邏輯)
+        // ----------------------------------------------------
+
+        // 1. 為標準控制按鈕添加 Click 事件 (速度、S)
+        driveControls.forEach(button => {
+            button.addEventListener('click', (event) => {
+                const command = event.currentTarget.getAttribute('data-command');
+                if (command) {
+                    sendBluetoothCommand(command);
+                }
+            });
+        });
+
+        // 獨立為中央的緊急停止按鈕添加 Click 事件
+        emergencyStopButton.addEventListener('click', (event) => {
+            const command = event.currentTarget.getAttribute('data-command');
+            if (command) {
+                    sendBluetoothCommand(command);
+            }
+        });
+
+
+        // 2. 設置按住/放開 (Press/Release) 邏輯
+        function setupPressAndHoldButton(button) {
+            const pressCommand = button.getAttribute('data-command-press');
+            const releaseCommand = button.getAttribute('data-command-release');
+            let isPressed = false;
+
+            const pressHandler = () => {
+                if (!isPressed) {
+                    sendBluetoothCommand(pressCommand);
+                    isPressed = true;
+                }
+            };
+            
+            const releaseHandler = () => {
+                if (isPressed) {
+                    sendBluetoothCommand(releaseCommand);
+                    isPressed = false;
+                }
+            };
+
+            // Desktop / Mouse Events
+            button.addEventListener('mousedown', pressHandler);
+            button.addEventListener('mouseup', releaseHandler);
+            button.addEventListener('mouseleave', releaseHandler); 
+
+            // Mobile / Touch Events
+            button.addEventListener('touchstart', (e) => {
+                e.preventDefault(); 
+                pressHandler();
+            }, { passive: false });
+            
+            button.addEventListener('touchend', (e) => {
+                e.preventDefault(); 
+                releaseHandler();
+            });
+        }
+
+        // 將 Press/Release 邏輯套用到前進、後退和轉向按鈕
+        setupPressAndHoldButton(driveForwardButton);
+        setupPressAndHoldButton(driveBackwardButton); 
+        setupPressAndHoldButton(turnLeftButton);
+        setupPressAndHoldButton(turnRightButton);
+
+        updateStatus('未連線');
+
+    </script>
+
+</body>
+</html>
